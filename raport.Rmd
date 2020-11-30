@@ -1,0 +1,202 @@
+---
+title: "COVID-19 raport"
+author: "Krzysztof Pruchniewicz 132116"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+<style>
+
+  .big-table{
+      overflow-x:scroll;
+      white-space: nowrap;
+  }
+  
+  .big-table img{
+     max-width: none;
+  }
+  
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, echo = FALSE, warning = FALSE, cache=TRUE)
+library(openxlsx)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(formattable)
+library(janitor)
+library(tidyr)
+library(caret)
+library(corrplot)
+library(plotly)
+library(scales)
+library(caret)
+library(mlbench)
+library(pROC)
+```
+
+```{r}
+df <- read.xlsx("http://www.cs.put.poznan.pl/dbrzezinski/teaching/zed/wuhan_blood_sample_data_Jan_Feb_2020.xlsx",
+  fillMergedCells = TRUE, sheet = 1, check.names = TRUE, sep.names = "_")
+
+df <- tibble(df) %>%
+  clean_names() %>%
+  rename(death = outcome) %>%
+  mutate(days_in_hospital = as.numeric(discharge_time - admission_time, units='days')) %>%
+  mutate(admission_time =  as.POSIXct(openxlsx::convertToDateTime(admission_time))) %>%
+  mutate(discharge_time = as.POSIXct(openxlsx::convertToDateTime(discharge_time))) %>%
+  mutate(re_date = openxlsx::convertToDateTime(re_date)) %>%
+  mutate(re_date = if_else(is.na(re_date), admission_time, re_date)) %>%
+  group_by(patient_id) %>%
+  fill(everything(), .direction = "updown") %>%
+  ungroup() %>%
+  mutate_all(~if_else(is.na(.), mean(., na.rm = TRUE), .)) %>%
+  mutate(death = factor(death))  %>%
+  mutate(gender = factor(gender)) %>%
+  mutate(gender = recode(gender, `1` = 'male', `2` = 'female')) %>%
+  mutate(death = recode(death, `0` = 'FALSE', `1` = 'TRUE'))
+
+df_persons <- df %>%
+  select(patient_id, age, gender, admission_time, discharge_time, death, days_in_hospital) %>%
+  distinct(patient_id, .keep_all = TRUE) %>%
+  group_by(patient_id)
+
+```
+
+## Najważniejsze spostrzeżenia
+
+Wiek jest skorelowany ze śmiercią. Mężczyźni częściej umierają. 
+
+Najistotniejsze atrybuty skorelowane z tym, że chory przeżyje to: 
+<ul>
+- albumin - główne białko występujące w osoczu krwi, stanowi 60% wszystkich zawartych w nim białek, 
+- platelet_count - liczba płytek krwi, 
+- monocytes - liczba monocytów, 
+- prothrombin_activity - aktywność protrombiny czyli białka odpowiedzialnego za krzepnięcie krwii,
+- lymphocyte_count - liczba limfocytów,
+- x_lymphocyte - limfocyty typu X, 
+- calcium - wapń.
+</ul>
+
+Wysoki poziom wapnia w krwii nazywany jest hiperkalcemią, która może być następstwem przedawkowania witamin A oraz D. Obserwacja ta pokrywa się z wnioskami lekarzy, którzy sugerują suplementować witaminę D jako zwiększającą szanse na bezpieczne przejście choroby.
+
+Najistotniejsze atrybuty skorelowane z tym, że chory umrze to: 
+<ul>
+- prothrombin_time - czas protrombinowy jest wskaźnikiem określającym czas powstawania skrzepów,
+- neutrophils - rodzaj komórek układu odpornościowego, które stanowią 50-75% leukocytów, 
+- urea - mocznik, organiczny związek chemiczny,
+- neutrophils_count - liczba neutrofili, 
+- d_d_dimer - biaka powstające podczas rozkładu zakrzepów w organizmie, 
+- lactate_dehydrogenase - enzym, który znajduje się w komórkach organizmu człowieka i bierze udział w przekształceniu glukozy, podwyższony poziom wynika z wydostania się enzymu na zewnątrz w momencie uszkodzenia komórki, 
+- international_standard_ratio - standaryzowany współczynnik czasu protrombinowego (pierwsza kropka w tym podpunkcie), 
+- high_sensitivity_c_reactive_protein - białko C-reaktywne, jest to czuły marker natężenia reakcji zapalnej organizmu.
+</ul>
+
+Wśród wymienionych biomarkeórów mamy takie oznaczających rozpad komórek, problemy z krzepnięciem krwii oraz oznaczające stan zapalny organizmu.
+
+Zebrane dane umożliwiaja stworzenie dzialajacego skutecznie klasyfikatora.
+
+## Podsumowanie danych
+
+Dane zostały zebrane między 10 stycznia a 18 lutego 2020 roku i obejmują informacje o wynikach badań krwi pacjentów przyjętych do szpitala Tongji w Wuhan w Chinach. Sposób zbierania danych oraz podstawowe statystyki zbioru opisane są w artykule [Tan *et al* article](https://www.nature.com/articles/s42256-020-0180-7). Celem przeprowadzonej analizy będzie zbadanie czynników wpływających na śmiertelność oraz stworzenie klasyfikatora przewidującego, czy dana osoba przeżyje, czy nie. Dane zawierają `r ncol (df)` kolumny z danymi dotyczącymi czasu, wieku, płci, danych próbek krwi i `r nrow (df)` wierszy. Wiersze zawieraj wyniki poszczególnych badań krwi, czasami wiele wierszy dotyczy tej samej osoby. Dane zawierają informacje o `r nrow(df_persons)` osobach chorych.
+
+Podsumowanie statystyk danych pacjentów:
+
+<div class="big-table">
+```{r}
+ knitr::kable(summary(df_persons))
+```
+</div>
+```{r}
+ggplot(df_persons, aes(gender, fill = death)) + geom_bar(stat = "count") +
+  labs(title = "Liczba chorych według płci", x = "Płeć", y = "Liczba osób")
+```
+
+```{r}
+ggplot(df_persons, aes(age, fill = death)) + geom_bar(width = 1) +
+  labs(title = "Liczba chorych według wieku", x = "Wiek", y = "Liczba osób") + scale_x_discrete(breaks = seq(0, 100, by=10))
+```
+
+```{r}
+ggplot(df, aes(age, fill=factor(death))) + geom_bar(width=1) + facet_grid(. ~ gender) + labs(title = "Liczba chorych według płeci i wieku", x = "Wiek", y = "Liczba osób") + scale_x_discrete(breaks = seq(0, 100, by=10))
+```
+
+Dane pokazują, że choroba jest bardziej śmiertelna dla mężczyzn. Ponadto dane obejmują znacznie więcej mężczyzn niż kobiet, co może oznaczać, że kobiety są bardziej odporne na chorobę lub mają często na tyle słabe objawy, że nie trafiają w ogóle do szpitali i są rzadziej badane.
+
+## Analiza wartości atrybutów
+
+Podsumowanie statystyk wszystkich dostępnych atrybutów:
+
+<div class="big-table">
+```{r}
+knitr::kable(summary(df))
+```
+</div>
+
+Niektóre brakujące dane zostały zastąpione średnią, a brakujące re_date zostały zastąpione admission_time.
+
+## Korelacja między atrybutami
+
+```{r}
+
+selected_attributes = c('death',	'prothrombin_time', 'albumin', 'platelet_count',	'monocytes', 'neutrophils', 'prothrombin_activity', 'urea',	'lymphocyte_count', 'neutrophils_count', 'x_lymphocyte', 'd_d_dimer', 'calcium', 'lactate_dehydrogenase', 'international_standard_ratio', 'high_sensitivity_c_reactive_protein')
+
+df_only_significant_attributes <- df %>%
+                            select(selected_attributes)
+
+df_persons_corelation = cor(as.matrix(df %>%
+                                  mutate_if(is.factor, as.numeric) %>%
+                                  select(selected_attributes)))
+
+corrplot(df_persons_corelation, method = "square", type = "lower", tl.col = "black", title = "Korelacja pomidzy biomarkerami a śmiercią chorego", mar = c(0,0,1,0), number.font = 1)
+```
+
+Wykres przedstawia korelację biomerkerów krwi ze śmiertelnością. Wybrane zostay tylko atrybuty o bezwzględnej wartości korelacji większej niż 0,6. Dodatnia korelacja ze śmiertelnością oznacza, że osoba prawdopodobnie umrze, ujemna korelacja oznacza, że prawdopodobnie przeżyje.
+
+## Wykres śmiertelności w czasie
+
+```{r}
+df_time_death <- df_persons %>%
+  arrange(discharge_time) %>%
+  mutate(discharge_time = as.Date(discharge_time)) %>%
+  mutate(dead = if_else(death == 'TRUE', 1, 0)) %>%
+  mutate(alive = if_else(death == 'FALSE', 1, 0))
+gg <- ggplot(df_time_death, aes(discharge_time)) + geom_line(aes(y=cumsum(dead)), color='red') +  geom_line(aes(y=cumsum(alive)), color='green') + labs(title = "Liczba osób zmarłych i żywych", x = "Data", y = "Liczba osób") + scale_x_date(date_breaks = "5 day", date_labels = "%d-%m-%Y") + theme(axis.text.x=element_text(angle=30, hjust=1))
+ggplotly(gg)
+```
+Wykres pokazuje liczbe osób, które wyzdrowiały lub zmarły z powodu COVID-19.
+
+## Klasyfikacja
+
+Podczas uczenia klasyfikatora dane podzielono na zbiór uczący (75% danych) i zestaw testowy (25% danych). Wybrany algorytm to Random Forest. Dane zawierają najważniejsze biomarkery: prothrombin_time, albumin, platelet_count,	monocytes, neutrophils, prothrombin_activity, urea,	lymphocyte_count, neutrophils_count, x_lymphocyte, d_d_dimer, calcium, lactate_dehydrogenase, international_standard_ratio oraz high_sensitivity_c_reactive_protein.
+
+```{r}
+set.seed(23)
+
+inTraining <- createDataPartition(
+        y = df_only_significant_attributes$death,
+        p = .75,
+        list = FALSE)
+
+training <- df_only_significant_attributes[ inTraining,]
+testing  <- df_only_significant_attributes[-inTraining,]
+
+ctrl <- trainControl(
+    method = "repeatedcv",
+    number = 2,
+    repeats = 2)
+
+fit <- train(death ~ .,
+             data = training,
+             method = "rf",
+             trControl = ctrl,
+             ntree = 2)
+
+rfClasses <- predict(fit, newdata = testing)
+confusionMatrix(data = rfClasses, testing$death)
+```
+Stworzony klasyfikator ma ponad 98% dokładności, co jest wynikiem dobrym. Niestety, istnieją przypadki zarówno false positive oraz true negative.
